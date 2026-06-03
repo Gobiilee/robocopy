@@ -24,51 +24,59 @@ class RoboCopier:
         self._is_cancelled = True
 
     def copy_file(self, src: Path, dst: Path) -> CopyResult:
-        """
-        Copies a single file, checking for cancellation before running.
-        """
-        # If cancelled before this thread picks up the task, abort early
         if self._is_cancelled:
             return CopyResult(success=False, filepath=src, error_message="Cancelled", cancelled=True)
             
         try:
+            # Tạo thư mục cha nếu chưa tồn tại (đề phòng)
+            dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             return CopyResult(success=True, filepath=src)
         except Exception as e:
             return CopyResult(success=False, filepath=src, error_message=str(e))
 
-    def execute_copy(self, src_dir: str, dest_dir: str) -> list[CopyResult]:
-        """Executes a multi-threaded folder copy with robust cancellation."""
-        self._is_cancelled = False
-        src_path = Path(src_dir)
-        dst_path = Path(dest_dir) / src_path.name
-        results: list[CopyResult] = []
+    def get_folder_stats(self, src_path):
+        """Scans the folder to return a list of files and total size in bytes."""
+        files = []
+        total_size_bytes = 0
+        for f in src_path.rglob('*'):
+            if f.is_file():
+                files.append(f)
+                total_size_bytes += f.stat().st_size 
+        return files, total_size_bytes
+    # def execute_copy(self, src_dir: str, dest_dir: str) -> list[CopyResult]:
+    #     """Executes a multi-threaded folder copy with robust cancellation."""
+    #     self._is_cancelled = False
+    #     src_path = Path(src_dir)
+    #     dst_path = Path(dest_dir) / src_path.name
+    #     results: list[CopyResult] = []
 
-        if not src_path.exists():
-            results.append(CopyResult(False, src_path, "Source directory does not exist."))
-            return results
+    #     if not src_path.exists():
+    #         results.append(CopyResult(False, src_path, "Source directory does not exist."))
+    #         return results
 
-        # Create folder structure
-        for d in src_path.rglob('*'):
-            if d.is_dir():
-                (dst_path / d.relative_to(src_path)).mkdir(parents=True, exist_ok=True)
+    #     # Create folder structure
+    #     dst_path.mkdir(parents=True, exist_ok=True)
+    #     for d in src_path.rglob('*'):
+    #         if d.is_dir():
+    #             (dst_path / d.relative_to(src_path)).mkdir(parents=True, exist_ok=True)
 
-        files = [f for f in src_path.rglob('*') if f.is_file()]
+    #     files = [f for f in src_path.rglob('*') if f.is_file()]
 
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            future_to_file = {}
-            for f in files:
-                # Do not submit new tasks if already cancelled
-                if self._is_cancelled:
-                    break
-                dest_file = dst_path / f.relative_to(src_path)
-                future = executor.submit(self.copy_file, f, dest_file)
-                future_to_file[future] = f
+    #     with ThreadPoolExecutor(max_workers=self.workers) as executor:
+    #         future_to_file = {}
+    #         for f in files:
+    #             # Do not submit new tasks if already cancelled
+    #             if self._is_cancelled:
+    #                 break
+    #             dest_file = dst_path / f.relative_to(src_path)
+    #             future = executor.submit(self.copy_file, f, dest_file)
+    #             future_to_file[future] = f
 
-            for future in as_completed(future_to_file):
-                result = future.result()
-                # Only add successful copies or non-cancelled failures to results
-                if not result.cancelled:
-                    results.append(result)
+    #         for future in as_completed(future_to_file):
+    #             result = future.result()
+    #             # Only add successful copies or non-cancelled failures to results
+    #             if not result.cancelled:
+    #                 results.append(result)
 
-        return results
+    #     return results

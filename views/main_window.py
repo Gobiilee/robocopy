@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QFileDialog, QLabel, QTextEdit, 
                              QSpinBox, QLineEdit)
+from PyQt6.QtGui import QIcon, QPixmap
 from viewmodels import MainViewModel
 
 class MainWindow(QMainWindow):
@@ -8,9 +9,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.vm = view_model
         
-        self.setWindowTitle("MVVM Py-RoboCopy")
+        self.setWindowTitle("RoboCopy")
         self.resize(650, 500)
         
+        self.setWindowIcon(QIcon(r"assets/logo.ico"))
         self._setup_ui()
         self._bind_view_model()
 

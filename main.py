@@ -10,38 +10,53 @@ Boot sequence
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication
+import traceback
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtGui     import QIcon
 from splash          import SplashScreen, _asset
 
 
+# Module-level reference so the window is never garbage-collected
+_main_window = None
+
+
 def _launch_main(splash: SplashScreen):
     """Called by the splash timer when the loading bar finishes."""
-    splash.set_status("Starting application…")
+    global _main_window
 
-    # Heavy imports happen here — after the splash is already visible
-    from viewmodels.main_vm  import MainViewModel
-    from views.main_window   import MainWindow
+    try:
+        splash.set_status("Starting application…")
 
-    vm     = MainViewModel()
-    window = MainWindow(vm)
+        from viewmodels.main_vm import MainViewModel
+        from views.main_window  import MainWindow
 
-    # Set window icon (title bar + taskbar)
-    window.setWindowIcon(QIcon(_asset("icon.ico")))
+        vm           = MainViewModel()
+        _main_window = MainWindow(vm)
+        _main_window.setWindowIcon(QIcon(_asset("icon.ico")))
 
-    splash.finish(window)
+        splash.finish(_main_window)
+
+    except Exception:
+        # Show the full traceback in a dialog so it is never silently swallowed
+        msg = traceback.format_exc()
+        splash.close()
+        err = QMessageBox()
+        err.setWindowTitle("Startup Error")
+        err.setIcon(QMessageBox.Icon.Critical)
+        err.setText("RoboCopy failed to start.")
+        err.setDetailedText(msg)
+        err.exec()
+        sys.exit(1)
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("RoboCopy")
-
-    # Set app-wide icon (affects taskbar group on Windows)
     app.setWindowIcon(QIcon(_asset("icon.ico")))
 
     splash = SplashScreen()
     splash.show()
-    app.processEvents()   # paint the splash before anything else runs
+    app.processEvents()
 
     splash.start(done_callback=lambda: _launch_main(splash))
 

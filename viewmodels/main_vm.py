@@ -7,6 +7,13 @@ The worker emits signals into thread-safe queues.
 A 100 ms QTimer on the main thread drains those queues and
 updates the UI in one batch — at most 10 repaints/second
 regardless of how many files complete per second.
+
+Large-file fix
+──────────────
+copier.copy_file() now accepts a progress_cb that fires after every
+256 KB chunk.  The worker emits a ``bytes_tick`` signal from that
+callback so stats/ETA keep updating even when only one huge file is
+being copied.
 """
 
 import time
@@ -50,6 +57,8 @@ class CopyWorker(QThread):
     scan_done    = pyqtSignal(int, int)
     # Emitted per completed file (name, size_bytes, success)
     file_done    = pyqtSignal(str, int, bool)
+    # Emitted after every chunk inside a large file (bytes_just_written)
+    bytes_tick   = pyqtSignal(int)
     # Periodic stats (copied_files, total_files, copied_bytes, total_bytes, speed_bps, eta_sec)
     stats_tick   = pyqtSignal(int, int, int, int, float, float)
     # Simple log lines
@@ -100,9 +109,58 @@ class CopyWorker(QThread):
         start_time = time.perf_counter()
         last_stats_emit = start_time
 
+        def _emit_stats():
+            """Recalculate and emit stats_tick. Called from progress_cb and after each file."""
+            nonlocal last_stats_emit
+            now = time.perf_counter()
+            if now - last_stats_emit < self.STATS_INTERVAL:
+                return
+            last_stats_emit = now
+
+            # Prune old window entries
+            cutoff = now - WINDOW
+            while speed_window and speed_window[0][0] < cutoff:
+                speed_window.popleft()
+
+            if speed_window:
+                window_bytes = sum(b for _, b in speed_window)
+                window_dur   = now - speed_window[0][0] + 0.001
+                speed_bps    = window_bytes / window_dur
+            else:
+                speed_bps = 0.0
+
+            remaining = max(total_bytes - copied_bytes, 0)
+            eta = remaining / speed_bps if speed_bps > 0 else 0.0
+            self.stats_tick.emit(
+                copied_files, total_files,
+                copied_bytes, total_bytes,
+                speed_bps, eta,
+            )
+
+        def _make_progress_cb():
+            """
+            Returns a closure that the copier calls after each 256 KB chunk.
+            Adds to the rolling speed window and emits a stats_tick if enough
+            time has passed — this is the key fix for large-file UI freezes.
+            """
+            def progress_cb(chunk_bytes: int):
+                nonlocal copied_bytes
+                now = time.perf_counter()
+                copied_bytes += chunk_bytes
+                speed_window.append((now, chunk_bytes))
+                # Signal raw bytes so the VM can re-emit to View
+                self.bytes_tick.emit(chunk_bytes)
+                _emit_stats()
+            return progress_cb
+
         with ThreadPoolExecutor(max_workers=self.copier.workers) as pool:
             future_map = {
-                pool.submit(self.copier.copy_file, f, dst_path / f.relative_to(src_path)): f
+                pool.submit(
+                    self.copier.copy_file,
+                    f,
+                    dst_path / f.relative_to(src_path),
+                    _make_progress_cb(),
+                ): f
                 for f in files
                 if not self.copier._is_cancelled
             }
@@ -118,36 +176,18 @@ class CopyWorker(QThread):
                 results.append(result)
                 copied_files += 1
 
+                # NOTE: copied_bytes already includes this file's bytes via
+                # the progress_cb, so we must NOT add size_bytes here again.
+                # We only nudge the speed window with a zero-byte marker so
+                # _emit_stats sees the updated copied_files count.
+                _emit_stats()
+
                 # Signal the completed file (cheap: name + int + bool)
                 self.file_done.emit(
                     result.filepath.name,
                     result.size_bytes,
                     result.success,
                 )
-
-                if result.success:
-                    copied_bytes += result.size_bytes
-                    now = time.perf_counter()
-                    speed_window.append((now, result.size_bytes))
-
-                    # Prune old window entries
-                    cutoff = now - WINDOW
-                    while speed_window and speed_window[0][0] < cutoff:
-                        speed_window.popleft()
-
-                    # Emit stats at most every STATS_INTERVAL seconds
-                    if now - last_stats_emit >= self.STATS_INTERVAL:
-                        last_stats_emit = now
-                        window_bytes = sum(b for _, b in speed_window)
-                        window_dur   = now - speed_window[0][0] + 0.001
-                        speed_bps    = window_bytes / window_dur
-                        remaining    = total_bytes - copied_bytes
-                        eta          = remaining / speed_bps if speed_bps > 0 else 0
-                        self.stats_tick.emit(
-                            copied_files, total_files,
-                            copied_bytes, total_bytes,
-                            speed_bps, eta,
-                        )
 
         # ── summary ───────────────────────────────────────────────────────────
         elapsed   = max(time.perf_counter() - start_time, 0.001)
@@ -218,6 +258,8 @@ class MainViewModel(QObject):
         self._worker.log_message.connect(self.log_updated)
         self._worker.file_done.connect(self._on_file_done)
         self._worker.stats_tick.connect(self._on_stats_tick)
+        # bytes_tick is emitted at chunk granularity; we intentionally do NOT
+        # connect it to anything heavy — _on_stats_tick already batches updates.
         self._worker.finished_sig.connect(self._on_finished)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()

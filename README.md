@@ -129,6 +129,76 @@ After compilation finishes, locate the ready-to-run file in the newly generated 
 
 ---
 
+## Automated Build & Release
+
+This project uses GitHub Actions to automatically build and publish Windows executable releases.
+
+### Release Workflow
+
+Whenever a version tag is pushed to the repository, GitHub Actions will:
+
+1. Create a clean Windows build environment.
+2. Install Python dependencies.
+3. Execute `build.py`.
+4. Generate `pyRoboCopy.exe`.
+5. Create a GitHub Release.
+6. Upload the generated executable as a release asset.
+
+### Creating a New Release
+
+After committing your changes:
+
+```powershell
+git add .
+git commit -m "Add new feature"
+git push origin Gobi
+```
+
+Create a version tag:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow will automatically:
+
+* Build the executable.
+* Create a GitHub Release named `v1.0.0`.
+* Upload `pyRoboCopy.exe`.
+
+### Versioning Convention
+
+Recommended semantic versioning:
+
+```text
+v1.0.0
+v1.0.1
+v1.1.0
+v2.0.0
+```
+
+Format:
+
+```text
+vMAJOR.MINOR.PATCH
+```
+
+Examples:
+
+* `v1.0.0` – First public release
+* `v1.0.1` – Bug fixes
+* `v1.1.0` – New features
+* `v2.0.0` – Breaking changes
+
+### Viewing Releases
+
+Published releases are available under:
+
+https://github.com/<repository-owner>/pyrobocopy/releases
+
+---
+
 ## Core Architecture Design & Logic Handlers
 
 ### File Locks & Open Windows Access

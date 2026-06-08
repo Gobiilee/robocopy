@@ -83,9 +83,9 @@ def main():
 
     if result.returncode == 0:
         exe = here / "dist" / f"{APP_NAME}.exe"
-        print(f"\n✓ Build succeeded: {exe}")
+        print(f"\nBuild succeeded: {exe}")
     else:
-        print("\n✗ Build failed. Check the output above.")
+        print("\nBuild failed. Check the output above.")
         sys.exit(result.returncode)
 
 

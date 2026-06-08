@@ -12,12 +12,9 @@ contents: write
 
 jobs:
 build-test-release:
-
-
 runs-on: windows-latest
 
 steps:
-
   - name: Checkout Repository
     uses: actions/checkout@v4
 
@@ -28,24 +25,19 @@ steps:
       cache: "pip"
 
   - name: Upgrade Pip
-    run: |
-      python -m pip install --upgrade pip
+    run: python -m pip install --upgrade pip
 
   - name: Install Dependencies
-    run: |
-      pip install -r requirements.txt
+    run: pip install -r requirements.txt
 
   - name: Install Test Dependencies
-    run: |
-      pip install pytest
+    run: pip install pytest
 
   - name: Run Unit Tests
-    run: |
-      pytest -v
+    run: pytest -v
 
   - name: Build Executable
-    run: |
-      python build.py
+    run: python build.py
 
   - name: Verify Build Output
     shell: powershell
@@ -68,8 +60,7 @@ steps:
     with:
       name: Release ${{ github.ref_name }}
       tag_name: ${{ github.ref_name }}
-      files: |
-        dist/pyRoboCopy.exe
+      files: dist/pyRoboCopy.exe
       generate_release_notes: true
       draft: false
       prerelease: false

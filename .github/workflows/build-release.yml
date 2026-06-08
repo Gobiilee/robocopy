@@ -3,7 +3,7 @@ name: Build and Release EXE
 on:
   push:
     branches:
-      - tim_dev     # Triggers automatically when you push to tim_dev
+      - main     # Triggers automatically when you push to tim_dev
     tags:
       - 'v*'        # Triggers automatically when you push a version tag
   workflow_dispatch: # Allows you to trigger it manually via the UI button

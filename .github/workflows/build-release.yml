@@ -2,8 +2,10 @@ name: Build and Release EXE
 
 on:
   push:
+    branches:
+      - Gobi     # Triggers automatically when you push to tim_dev
     tags:
-      - 'v0.0.2' # Triggers the workflow whenever you push a version tag like v1.0.0
+      - 'v*' # Triggers the workflow whenever you push a version tag like v1.0.0
 
 permissions:
   contents: write # Required to create a release and upload assets

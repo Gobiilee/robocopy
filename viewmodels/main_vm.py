@@ -1,15 +1,20 @@
 """
-ViewModel – bridges CopyWorker (background thread) and the View.
+ViewModel – bridges CopyWorker / RobocopyWorker (background thread) and the View.
 
-Performance design
-──────────────────
+Copy-engine modes
+─────────────────
+  "python"   – built-in chunked copy via models.copier.RoboCopier  (original)
+  "robocopy" – subprocess robocopy.exe via models.robocopy_runner.RobocopyRunner
+
+Performance design (python mode)
+──────────────────────────────────
 The worker emits signals into thread-safe queues.
 A 100 ms QTimer on the main thread drains those queues and
 updates the UI in one batch — at most 10 repaints/second
 regardless of how many files complete per second.
 
-Large-file fix
-──────────────
+Large-file fix (python mode)
+──────────────────────────────
 copier.copy_file() now accepts a progress_cb that fires after every
 256 KB chunk.  The worker emits a ``bytes_tick`` signal from that
 callback so stats/ETA keep updating even when only one huge file is
@@ -25,6 +30,7 @@ from queue import Queue, Empty
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
 
 from models.copier import RoboCopier, CopyResult
+from models.robocopy_runner import RobocopyRunner, RobocopyOptions
 
 
 # ── formatting helpers ────────────────────────────────────────────────────────
@@ -44,7 +50,7 @@ def fmt_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-# ── worker thread ─────────────────────────────────────────────────────────────
+# ── Python-mode worker thread ─────────────────────────────────────────────────
 
 class CopyWorker(QThread):
     """
@@ -178,8 +184,6 @@ class CopyWorker(QThread):
 
                 # NOTE: copied_bytes already includes this file's bytes via
                 # the progress_cb, so we must NOT add size_bytes here again.
-                # We only nudge the speed window with a zero-byte marker so
-                # _emit_stats sees the updated copied_files count.
                 _emit_stats()
 
                 # Signal the completed file (cheap: name + int + bool)
@@ -207,12 +211,71 @@ class CopyWorker(QThread):
         self.finished_sig.emit(results)
 
 
+# ── Robocopy-mode worker thread ───────────────────────────────────────────────
+
+class RobocopyWorker(QThread):
+    """
+    Wraps RobocopyRunner in a QThread and re-emits the same signals
+    as CopyWorker so MainViewModel can handle both identically.
+    """
+
+    scan_done    = pyqtSignal(int, int)
+    file_done    = pyqtSignal(str, int, bool)
+    bytes_tick   = pyqtSignal(int)
+    stats_tick   = pyqtSignal(int, int, int, int, float, float)
+    log_message  = pyqtSignal(str)
+    finished_sig = pyqtSignal(list)   # emits empty list (no CopyResult objects)
+
+    def __init__(self, runner: RobocopyRunner, src: str, dst: str):
+        super().__init__()
+        self.runner = runner
+        self.src    = src
+        self.dst    = dst
+
+    def run(self) -> None:
+        self.runner._cancelled = False
+
+        # Emit a synthetic scan_done so the UI shows *something* immediately.
+        # We don't have a total in advance with robocopy, so we use 0/0.
+        self.scan_done.emit(0, 0)
+
+        def _log(line: str):
+            self.log_message.emit(line)
+
+        def _file_done(name: str, size: int, ok: bool):
+            self.file_done.emit(name, size, ok)
+
+        def _stats(cf, tf, cb, tb, speed, eta):
+            self.stats_tick.emit(cf, tf, cb, tb, speed, eta)
+
+        def _finished(ok: bool, exit_code: int):
+            status = "completed" if ok else f"finished with errors (code {exit_code})"
+            self.log_message.emit(f"robocopy {status}  (exit {exit_code})")
+
+        try:
+            exit_code = self.runner.run(
+                self.src, self.dst,
+                log_cb=_log,
+                file_done_cb=_file_done,
+                stats_cb=_stats,
+                finished_cb=_finished,
+            )
+        except Exception as exc:
+            self.log_message.emit(f"ERROR: {exc}")
+
+        self.finished_sig.emit([])
+
+
 # ── view-model ────────────────────────────────────────────────────────────────
 
 class MainViewModel(QObject):
     """
     Receives raw signals from the worker, buffers them,
     and re-emits coarse-grained UI signals on a 100 ms timer.
+
+    Supports two copy engines:
+      • "python"   – built-in Python copy  (CopyWorker)
+      • "robocopy" – subprocess robocopy   (RobocopyWorker)
     """
 
     # ── outgoing signals (View listens to these) ──────────────────────────────
@@ -229,7 +292,11 @@ class MainViewModel(QObject):
     def __init__(self) -> None:
         super().__init__()
         self.copier  = RoboCopier()
-        self._worker: CopyWorker | None = None
+        self.runner  = RobocopyRunner()          # robocopy engine
+        self._worker: CopyWorker | RobocopyWorker | None = None
+
+        # Current engine: "python" or "robocopy"
+        self.engine: str = "python"
 
         # Pending file events waiting to be flushed to the View
         self._pending_files: list[tuple[str, str, str]] = []
@@ -244,32 +311,48 @@ class MainViewModel(QObject):
 
     # ── public ────────────────────────────────────────────────────────────────
 
+    def set_engine(self, engine: str) -> None:
+        """Switch copy engine. Call before start_copy(). engine ∈ {'python','robocopy'}"""
+        assert engine in ("python", "robocopy"), f"Unknown engine: {engine!r}"
+        self.engine = engine
+
+    def set_robocopy_options(self, options: RobocopyOptions) -> None:
+        self.runner.options = options
+
     def start_copy(self, src: str, dst: str, workers: int) -> None:
         if not src or not dst:
             self.log_updated.emit("Error: Source and Destination must be set.")
             return
 
-        self.copier.workers = workers
         self._pending_files.clear()
         self._last_stats = None
         self.ui_busy.emit(True)
 
-        self._worker = CopyWorker(self.copier, src, dst)
-        self._worker.log_message.connect(self.log_updated)
-        self._worker.file_done.connect(self._on_file_done)
-        self._worker.stats_tick.connect(self._on_stats_tick)
-        # bytes_tick is emitted at chunk granularity; we intentionally do NOT
-        # connect it to anything heavy — _on_stats_tick already batches updates.
-        self._worker.finished_sig.connect(self._on_finished)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.start()
+        if self.engine == "robocopy":
+            # Pass workers into the robocopy options thread count
+            self.runner.options.threads = workers
+            worker = RobocopyWorker(self.runner, src, dst)
+        else:
+            self.copier.workers = workers
+            worker = CopyWorker(self.copier, src, dst)
+
+        self._worker = worker
+        worker.log_message.connect(self.log_updated)
+        worker.file_done.connect(self._on_file_done)
+        worker.stats_tick.connect(self._on_stats_tick)
+        worker.finished_sig.connect(self._on_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
         self._flush_timer.start()
 
     def cancel_copy(self) -> None:
         if self._worker and self._worker.isRunning():
             self.log_updated.emit("Cancellation requested…")
-            self.copier.cancel()
+            if isinstance(self._worker, RobocopyWorker):
+                self.runner.cancel()
+            else:
+                self.copier.cancel()
 
     # ── worker signal receivers (can be called from any thread via Qt queued) ─
 

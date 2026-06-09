@@ -6,9 +6,12 @@ It is entirely independent of the UI layer.
 """
 
 from .copier import RoboCopier, CopyResult
+from .robocopy_runner import RobocopyRunner, RobocopyOptions
 
 # The __all__ variable restricts what gets imported if someone uses `from models import *`
 __all__ = [
     "RoboCopier",
-    "CopyResult"
+    "CopyResult",
+    "RobocopyRunner",
+    "RobocopyOptions"
 ]

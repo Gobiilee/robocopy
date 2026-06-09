@@ -14,11 +14,14 @@ from PyQt6.QtWidgets import (
     QTextEdit, QSpinBox, QLineEdit, QFrame,
     QTabWidget, QTreeWidget, QTreeWidgetItem,
     QScrollArea, QSizePolicy, QMessageBox,
+    QDialog, QCheckBox, QGroupBox, QGridLayout,
+    QRadioButton, QButtonGroup, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui  import QTextCursor, QIcon, QColor, QFont
 
 from viewmodels.main_vm     import MainViewModel
+from models.robocopy_runner import RobocopyOptions
 from viewmodels.network_vm  import NetworkViewModel
 from models.smb_browser     import SMBEntry
 
@@ -226,7 +229,7 @@ class StatsBar(QFrame):
         # Use a plain QWidget with no border/background of its own
         w = QWidget()
         w.setStyleSheet("QWidget { border: none; background: transparent; }")
-        w.setFixedWidth(110)
+        w.setMinimumWidth(80)
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(1)
@@ -261,13 +264,264 @@ class StatsBar(QFrame):
         self.bar.setValue(0)
 
 
+
+# ── RobocopySettingsDialog ────────────────────────────────────────────────────
+
+ROBOCOPY_COPY_FLAGS = [
+    ("D", "Data"),
+    ("A", "Attributes"),
+    ("T", "Timestamps"),
+    ("S", "Security (NTFS ACLs)"),
+    ("O", "Owner info"),
+    ("U", "Auditing info"),
+]
+
+
+def _section(title: str) -> QGroupBox:
+    g = QGroupBox(title)
+    g.setStyleSheet("""
+        QGroupBox {
+            color: #888; font-size: 8pt; font-weight: bold;
+            border: 1px solid #333; border-radius: 5px;
+            margin-top: 6px; padding-top: 10px;
+        }
+        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+    """)
+    return g
+
+
+def _chk(label: str, checked: bool = False) -> QCheckBox:
+    c = QCheckBox(label)
+    c.setChecked(checked)
+    c.setStyleSheet("QCheckBox { color: #ccc; font-size: 9pt; }")
+    return c
+
+
+def _field_label(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet("color: #888; font-size: 8.5pt;")
+    lbl.setFixedWidth(130)
+    return lbl
+
+
+def _small_spin(lo: int, hi: int, val: int) -> QSpinBox:
+    s = QSpinBox()
+    s.setRange(lo, hi)
+    s.setValue(val)
+    s.setFixedWidth(72)
+    s.setFixedHeight(28)
+    s.setStyleSheet("""
+        QSpinBox { background:#2a2a2a; border:1px solid #3a3a3a;
+                   border-radius:4px; color:#e0e0e0; padding:2px 6px; font-size:9pt; }
+        QSpinBox::up-button, QSpinBox::down-button { width:16px; background:#333; border:none; }
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover { background:#444; }
+    """)
+    return s
+
+
+def _small_edit(placeholder: str = "", text: str = "") -> QLineEdit:
+    e = QLineEdit()
+    e.setPlaceholderText(placeholder)
+    e.setText(text)
+    e.setFixedHeight(28)
+    e.setStyleSheet("""
+        QLineEdit { background:#1e1e1e; border:1px solid #3a3a3a;
+                    border-radius:4px; color:#e0e0e0; padding:2px 8px; font-size:9pt; }
+        QLineEdit:focus { border-color: #1a73e8; }
+    """)
+    return e
+
+
+class RobocopySettingsDialog(QDialog):
+    """Modal for configuring all robocopy options."""
+
+    def __init__(self, opts: RobocopyOptions, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Robocopy Settings")
+        self.setMinimumWidth(500)
+        self.setStyleSheet("""
+            QDialog { background: #1a1a1a; color: #e0e0e0; }
+            QLabel  { color: #ccc; }
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        root.addWidget(scroll)
+
+        inner = QWidget()
+        scroll.setWidget(inner)
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+
+        # ── Copy behaviour ────────────────────────────────────────────────────
+        grp_copy = _section("Copy Behaviour")
+        g_lay = QVBoxLayout(grp_copy)
+        g_lay.setSpacing(5)
+
+        self.chk_mirror      = _chk("/MIR  Mirror tree (delete extra files in destination)", opts.mirror)
+        self.chk_move        = _chk("/MOV  Move files (delete source after copying)",        opts.move_files)
+        self.chk_subdirs     = _chk("/S    Copy non-empty subdirectories",                   opts.copy_subdirs)
+        self.chk_empty_dirs  = _chk("/E    Copy all subdirectories incl. empty ones",        opts.copy_empty_dirs)
+
+        # Mirror / Move are mutually exclusive
+        self._mirror_group = QButtonGroup(self)
+        self._mirror_group.setExclusive(False)
+        for chk in (self.chk_mirror, self.chk_move):
+            g_lay.addWidget(chk)
+
+        self.chk_mirror.toggled.connect(lambda v: self.chk_move.setChecked(False) if v else None)
+        self.chk_move.toggled.connect(lambda v: self.chk_mirror.setChecked(False) if v else None)
+
+        # /E supersedes /S
+        g_lay.addWidget(self.chk_subdirs)
+        g_lay.addWidget(self.chk_empty_dirs)
+        self.chk_empty_dirs.toggled.connect(
+            lambda v: self.chk_subdirs.setChecked(False) if v else None)
+        self.chk_subdirs.toggled.connect(
+            lambda v: self.chk_empty_dirs.setChecked(False) if v else None)
+
+        # COPY flags
+        flag_row = QHBoxLayout()
+        flag_row.addWidget(_field_label("/COPY flags:"))
+        self._flag_checks: dict[str, QCheckBox] = {}
+        for flag, desc in ROBOCOPY_COPY_FLAGS:
+            c = QCheckBox(f"{flag} ({desc})")
+            c.setStyleSheet("QCheckBox { color: #bbb; font-size: 8.5pt; }")
+            c.setChecked(flag in opts.copy_flags)
+            self._flag_checks[flag] = c
+            flag_row.addWidget(c)
+        flag_row.addStretch()
+        g_lay.addLayout(flag_row)
+
+        lay.addWidget(grp_copy)
+
+        # ── Retry ─────────────────────────────────────────────────────────────
+        grp_retry = _section("Retry")
+        r_lay = QGridLayout(grp_retry)
+        r_lay.setHorizontalSpacing(8)
+        r_lay.setVerticalSpacing(6)
+
+        self.spin_retry = _small_spin(0, 999, opts.retry_count)
+        self.spin_wait  = _small_spin(0, 300, opts.retry_wait)
+
+        r_lay.addWidget(_field_label("/R  Retry count:"), 0, 0)
+        r_lay.addWidget(self.spin_retry, 0, 1)
+        r_lay.addWidget(_field_label("/W  Wait (seconds):"), 1, 0)
+        r_lay.addWidget(self.spin_wait, 1, 1)
+        r_lay.setColumnStretch(2, 1)
+
+        lay.addWidget(grp_retry)
+
+        # ── Filtering ─────────────────────────────────────────────────────────
+        grp_filt = _section("File Filtering")
+        f_lay = QGridLayout(grp_filt)
+        f_lay.setHorizontalSpacing(8)
+        f_lay.setVerticalSpacing(6)
+
+        self.edit_xf = _small_edit("e.g.  *.tmp  ~*", opts.exclude_files)
+        self.edit_xd = _small_edit("e.g.  .git  __pycache__", opts.exclude_dirs)
+        self.chk_xo  = _chk("/XO  Exclude files older than destination", opts.exclude_older)
+        self.chk_xn  = _chk("/XN  Exclude files newer than destination", opts.exclude_newer)
+
+        f_lay.addWidget(_field_label("/XF  Exclude files:"), 0, 0)
+        f_lay.addWidget(self.edit_xf, 0, 1)
+        f_lay.addWidget(_field_label("/XD  Exclude dirs:"), 1, 0)
+        f_lay.addWidget(self.edit_xd, 1, 1)
+        f_lay.addWidget(self.chk_xo, 2, 0, 1, 2)
+        f_lay.addWidget(self.chk_xn, 3, 0, 1, 2)
+        f_lay.setColumnStretch(1, 1)
+
+        lay.addWidget(grp_filt)
+
+        # ── Logging ───────────────────────────────────────────────────────────
+        grp_log = _section("Logging")
+        l_lay = QGridLayout(grp_log)
+        l_lay.setHorizontalSpacing(8)
+        l_lay.setVerticalSpacing(6)
+
+        self.edit_logfile = _small_edit("Leave empty for no log file", opts.log_file)
+        l_lay.addWidget(_field_label("/LOG  Log file path:"), 0, 0)
+        l_lay.addWidget(self.edit_logfile, 0, 1)
+        l_lay.setColumnStretch(1, 1)
+
+        lay.addWidget(grp_log)
+
+        # ── Extra flags ───────────────────────────────────────────────────────
+        grp_extra = _section("Extra Flags")
+        e_lay = QHBoxLayout(grp_extra)
+        self.edit_extra = _small_edit("e.g.  /Z /B /DCOPY:T", opts.extra_flags)
+        e_lay.addWidget(_field_label("Additional flags:"))
+        e_lay.addWidget(self.edit_extra, 1)
+
+        lay.addWidget(grp_extra)
+        lay.addStretch()
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.setStyleSheet("""
+            QPushButton { background:#2a2a2a; border:1px solid #444;
+                          border-radius:4px; color:#ccc; padding:5px 18px; font-size:9pt; }
+            QPushButton:hover { background:#383838; }
+            QPushButton[text="OK"] { background:#1a73e8; color:white; border:none; }
+            QPushButton[text="OK"]:hover { background:#1565c0; }
+        """)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def get_options(self) -> RobocopyOptions:
+        """Return a new RobocopyOptions built from the current widget state."""
+        flags = "".join(f for f, c in self._flag_checks.items() if c.isChecked())
+        return RobocopyOptions(
+            mirror          = self.chk_mirror.isChecked(),
+            move_files      = self.chk_move.isChecked(),
+            copy_subdirs    = self.chk_subdirs.isChecked(),
+            copy_empty_dirs = self.chk_empty_dirs.isChecked(),
+            copy_flags      = flags,
+            retry_count     = self.spin_retry.value(),
+            retry_wait      = self.spin_wait.value(),
+            exclude_files   = self.edit_xf.text().strip(),
+            exclude_dirs    = self.edit_xd.text().strip(),
+            exclude_older   = self.chk_xo.isChecked(),
+            exclude_newer   = self.chk_xn.isChecked(),
+            log_file        = self.edit_logfile.text().strip(),
+            extra_flags     = self.edit_extra.text().strip(),
+        )
+
+
 # ── LOCAL TAB ────────────────────────────────────────────────────────────────
 
 class LocalTab(QWidget):
     def __init__(self, vm: MainViewModel):
         super().__init__()
         self.vm = vm
-        layout = QVBoxLayout(self)
+
+        # ── outer layout holds only the scroll area ───────────────────────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        outer.addWidget(scroll)
+
+        # ── inner widget is the real content ─────────────────────────────────
+        inner = QWidget()
+        scroll.setWidget(inner)
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(8)
 
@@ -314,7 +568,8 @@ class LocalTab(QWidget):
         layout.addWidget(_label("LOG", bold=True, size=8, color="#555555"))
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setFixedHeight(80)
+        self.log_area.setMinimumHeight(60)
+        self.log_area.setMaximumHeight(120)
         self.log_area.setStyleSheet("""
             QTextEdit { background:#1e1e1e; border:1px solid #333;
                         border-radius:6px; color:#aaa;
@@ -322,6 +577,56 @@ class LocalTab(QWidget):
                         font-size:8pt; padding:4px; }
         """)
         layout.addWidget(self.log_area)
+
+        # ── Engine toggle row ────────────────────────────────────────────────
+        engine_row = QHBoxLayout()
+        engine_row.setSpacing(6)
+        engine_row.setContentsMargins(0, 0, 0, 0)
+
+        engine_row.addWidget(_label("Engine:", color="#888888", size=9))
+
+        self.btn_engine_py = QPushButton("🐍 Python")
+        self.btn_engine_py.setCheckable(True)
+        self.btn_engine_py.setChecked(True)
+        self.btn_engine_py.setFixedHeight(28)
+        self.btn_engine_py.setMinimumWidth(88)
+
+        self.btn_engine_rc = QPushButton("⚙ Robocopy")
+        self.btn_engine_rc.setCheckable(True)
+        self.btn_engine_rc.setChecked(False)
+        self.btn_engine_rc.setFixedHeight(28)
+        self.btn_engine_rc.setMinimumWidth(100)
+
+        self._engine_btn_group = QButtonGroup(self)
+        self._engine_btn_group.setExclusive(True)
+        self._engine_btn_group.addButton(self.btn_engine_py, 0)
+        self._engine_btn_group.addButton(self.btn_engine_rc, 1)
+
+        self._update_engine_btn_styles()
+        self._engine_btn_group.idClicked.connect(self._on_engine_changed)
+
+        engine_row.addWidget(self.btn_engine_py)
+        engine_row.addWidget(self.btn_engine_rc)
+
+        # Gear button — opens RobocopySettingsDialog
+        self.gear_btn = QPushButton("⚙")
+        self.gear_btn.setFixedSize(28, 28)
+        self.gear_btn.setToolTip("Robocopy options…")
+        self.gear_btn.setEnabled(False)   # enabled only in robocopy mode
+        self.gear_btn.setStyleSheet("""
+            QPushButton {
+                background: #2d2d2d; border: 1px solid #4a4a4a;
+                border-radius: 5px; color: #aaa; font-size: 12pt;
+            }
+            QPushButton:enabled:hover  { background: #383838; color: #fff; }
+            QPushButton:pressed        { background: #252525; }
+            QPushButton:disabled       { color: #444; background: #222; border-color: #333; }
+        """)
+        self.gear_btn.clicked.connect(self._open_robocopy_settings)
+        engine_row.addWidget(self.gear_btn)
+
+        engine_row.addStretch()
+        layout.addLayout(engine_row)
 
         # ── Bottom row: threads + start/cancel ────────────────────────────────
         bottom = QHBoxLayout()
@@ -403,11 +708,47 @@ class LocalTab(QWidget):
             self.action_btn.setEnabled(False)
             self.vm.cancel_copy()
 
+    # ── engine toggle ────────────────────────────────────────────────────────
+
+    def _on_engine_changed(self, btn_id: int) -> None:
+        is_robocopy = (btn_id == 1)
+        self.gear_btn.setEnabled(is_robocopy)
+        self.vm.set_engine("robocopy" if is_robocopy else "python")
+        self._update_engine_btn_styles()
+
+    def _update_engine_btn_styles(self) -> None:
+        active_style = """
+            QPushButton {
+                background: #1a73e8; border: none; border-radius: 5px;
+                color: white; font-size: 9pt; font-weight: bold; padding: 0 10px;
+            }
+        """
+        inactive_style = """
+            QPushButton {
+                background: #2d2d2d; border: 1px solid #4a4a4a;
+                border-radius: 5px; color: #aaa; font-size: 9pt; padding: 0 10px;
+            }
+            QPushButton:hover { background: #383838; color: #ddd; }
+        """
+        self.btn_engine_py.setStyleSheet(
+            active_style if self.btn_engine_py.isChecked() else inactive_style)
+        self.btn_engine_rc.setStyleSheet(
+            active_style if self.btn_engine_rc.isChecked() else inactive_style)
+
+    def _open_robocopy_settings(self) -> None:
+        dlg = RobocopySettingsDialog(self.vm.runner.options, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.vm.set_robocopy_options(dlg.get_options())
+
     def _set_busy(self, busy: bool):
         self.action_btn.setEnabled(True)
         self.src_card.set_enabled(not busy)
         self.dst_card.set_enabled(not busy)
         self.thread_spin.setEnabled(not busy)
+        self.btn_engine_py.setEnabled(not busy)
+        self.btn_engine_rc.setEnabled(not busy)
+        # Gear only active in robocopy mode and when not busy
+        self.gear_btn.setEnabled(not busy and self.btn_engine_rc.isChecked())
         self._style_cancel() if busy else self._style_start()
 
     def _style_start(self):
@@ -521,7 +862,23 @@ class NetworkTab(QWidget):
         self._expanding: set[str] = set()   # UNC paths currently being fetched
         self._block_check_signal = False
 
-        layout = QVBoxLayout(self)
+        # ── outer layout holds only the scroll area ───────────────────────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        outer.addWidget(scroll)
+
+        # ── inner widget is the real content ─────────────────────────────────
+        inner = QWidget()
+        scroll.setWidget(inner)
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
@@ -586,10 +943,14 @@ class NetworkTab(QWidget):
         layout.addLayout(tree_header_row)
 
         self.tree = SMBTreeWidget()
-        self.tree.setMinimumHeight(200)
+        self.tree.setMinimumHeight(160)
+        self.tree.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self.tree.itemExpanded.connect(self._on_item_expanded)
         self.tree.itemChanged.connect(self._on_item_changed)
-        layout.addWidget(self.tree, 1)
+        layout.addWidget(self.tree)
 
         # ── destination + stats ───────────────────────────────────────────────
         self.dst_card = PathCard("DOWNLOAD DESTINATION", "Choose destination folder…")
@@ -604,7 +965,8 @@ class NetworkTab(QWidget):
         layout.addWidget(_label("FILES", bold=True, size=8, color="#555555"))
         self.file_log = QTextEdit()
         self.file_log.setReadOnly(True)
-        self.file_log.setFixedHeight(130)
+        self.file_log.setMinimumHeight(80)
+        self.file_log.setMaximumHeight(200)
         self.file_log.setStyleSheet("""
             QTextEdit { background:#1e1e1e; border:1px solid #333;
                         border-radius:6px; color:#ddd;
@@ -617,7 +979,8 @@ class NetworkTab(QWidget):
         layout.addWidget(_label("LOG", bold=True, size=8, color="#555555"))
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setFixedHeight(70)
+        self.log_area.setMinimumHeight(60)
+        self.log_area.setMaximumHeight(120)
         self.log_area.setStyleSheet("""
             QTextEdit { background:#1e1e1e; border:1px solid #333;
                         border-radius:6px; color:#aaa;
@@ -836,7 +1199,8 @@ class MainWindow(QMainWindow):
         self.net_vm  = NetworkViewModel()
 
         self.setWindowTitle("RoboCopy")
-        self.resize(780, 720)
+        self.setMinimumSize(480, 400)   # smallest usable size on any screen
+        self.resize(780, 720)           # default size — user can resize freely
         self.setStyleSheet(DARK)
 
         root = QWidget()

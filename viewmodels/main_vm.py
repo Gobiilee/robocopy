@@ -22,7 +22,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer, pyqtSlot
 
 from models.copier import RoboCopier, CopyResult
 
@@ -209,91 +209,342 @@ class CopyWorker(QThread):
 
 # ── view-model ────────────────────────────────────────────────────────────────
 
+# class MainViewModel(QObject):
+#     """
+#     Receives raw signals from the worker, buffers them,
+#     and re-emits coarse-grained UI signals on a 100 ms timer.
+#     """
+
+#     # ── outgoing signals (View listens to these) ──────────────────────────────
+#     log_updated   = pyqtSignal(str)
+#     # Batch of completed rows: list of (name, size_str, status_str)
+#     file_batch    = pyqtSignal(list)
+#     stats_update  = pyqtSignal(int, int, int, int, float, float)
+#     copy_finished = pyqtSignal()
+#     ui_busy       = pyqtSignal(bool)
+
+#     # ── flush interval ────────────────────────────────────────────────────────
+#     FLUSH_MS = 100   # drain queue and repaint at most 10×/s
+
+#     def __init__(self) -> None:
+#         super().__init__()
+#         self.copier  = RoboCopier()
+#         self._worker: CopyWorker | None = None
+
+#         # Pending file events waiting to be flushed to the View
+#         self._pending_files: list[tuple[str, str, str]] = []
+
+#         # 100 ms flush timer (only runs while copying)
+#         self._flush_timer = QTimer(self)
+#         self._flush_timer.setInterval(self.FLUSH_MS)
+#         self._flush_timer.timeout.connect(self._flush)
+
+#         # Cache the last stats so we can re-emit on flush
+#         self._last_stats: tuple | None = None
+
+#     # ── public ────────────────────────────────────────────────────────────────
+#     @pyqtSlot(str, str, int)
+#     def start_copy(self, src: str, dst: str, workers: int) -> None:
+#         if not src or not dst:
+#             self.log_updated.emit("Error: Source and Destination must be set.")
+#             return
+
+#         self.copier.workers = workers
+#         self._pending_files.clear()
+#         self._last_stats = None
+#         self.ui_busy.emit(True)
+
+#         self._worker = CopyWorker(self.copier, src, dst)
+#         self._worker.log_message.connect(self.log_updated)
+#         self._worker.file_done.connect(self._on_file_done)
+#         self._worker.stats_tick.connect(self._on_stats_tick)
+#         # bytes_tick is emitted at chunk granularity; we intentionally do NOT
+#         # connect it to anything heavy — _on_stats_tick already batches updates.
+#         self._worker.finished_sig.connect(self._on_finished)
+#         self._worker.finished.connect(self._worker.deleteLater)
+#         self._worker.start()
+
+#         self._flush_timer.start()
+
+#     @pyqtSlot()
+#     def cancel_copy(self) -> None:
+#         if self._worker and self._worker.isRunning():
+#             self.log_updated.emit("Cancellation requested…")
+#             self.copier.cancel()
+
+#     # ── worker signal receivers (can be called from any thread via Qt queued) ─
+
+#     def _on_file_done(self, name: str, size_bytes: int, success: bool) -> None:
+#         status = "done" if success else "failed"
+#         self._pending_files.append((name, fmt_size(size_bytes), status))
+
+#     def _on_stats_tick(self, cf, tf, cb, tb, speed, eta) -> None:
+#         # Just cache; _flush will emit to the View
+#         self._last_stats = (cf, tf, cb, tb, speed, eta)
+
+#     def _on_finished(self, results: list) -> None:
+#         self._flush_timer.stop()
+#         self._flush()          # drain anything still pending
+#         self.ui_busy.emit(False)
+#         self.copy_finished.emit()
+
+#     # ── flush (main thread, called by timer) ──────────────────────────────────
+
+#     def _flush(self) -> None:
+#         if self._pending_files:
+#             self.file_batch.emit(list(self._pending_files))
+#             self._pending_files.clear()
+
+#         if self._last_stats:
+#             self.stats_update.emit(*self._last_stats)
+#             self._last_stats = None
+
+
+# viewmodels/main_vm.py
+import time
+from collections import deque
+from pathlib import Path
+from queue import Queue, Empty
+
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer, pyqtProperty, pyqtSlot
+
+from models.copier import RoboCopier, CopyResult
+# from viewmodels.worker import CopyWorker # Make sure to import your original worker class here
+
+
 class MainViewModel(QObject):
-    """
-    Receives raw signals from the worker, buffers them,
-    and re-emits coarse-grained UI signals on a 100 ms timer.
-    """
-
-    # ── outgoing signals (View listens to these) ──────────────────────────────
-    log_updated   = pyqtSignal(str)
-    # Batch of completed rows: list of (name, size_str, status_str)
-    file_batch    = pyqtSignal(list)
-    stats_update  = pyqtSignal(int, int, int, int, float, float)
-    copy_finished = pyqtSignal()
-    ui_busy       = pyqtSignal(bool)
-
-    # ── flush interval ────────────────────────────────────────────────────────
-    FLUSH_MS = 100   # drain queue and repaint at most 10×/s
+    # ── MANDATORY NOTIFY SIGNALS FOR QML BINDINGS ────────────────────────────
+    srcPathChanged = pyqtSignal(str)
+    dstPathChanged = pyqtSignal(str)
+    isBusyChanged = pyqtSignal(bool)
+    speedTextChanged = pyqtSignal(str)
+    etaTextChanged = pyqtSignal(str)
+    progressPctChanged = pyqtSignal(int)
+    filesLogChanged = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
-        self.copier  = RoboCopier()
-        self._worker: CopyWorker | None = None
+        # Internal private memory storage
+        self._src_path = ""
+        self._dst_path = ""
+        self._is_busy = False
+        self._speed_text = "— B/s"
+        self._eta_text = "—"
+        self._progress_pct = 0
+        self._files_html_log = ""  # Accumulated HTML log string rendered by QML TextArea
 
-        # Pending file events waiting to be flushed to the View
-        self._pending_files: list[tuple[str, str, str]] = []
+        # Threading worker references
+        self.worker = None
 
-        # 100 ms flush timer (only runs while copying)
-        self._flush_timer = QTimer(self)
-        self._flush_timer.setInterval(self.FLUSH_MS)
-        self._flush_timer.timeout.connect(self._flush)
+        # ── BATCH TIMER (Drains logging queue 10 times per second) ────────────
+        self.ui_timer = QTimer()
+        self.ui_timer.setInterval(100)  # 100 ms batch interval
+        self.ui_timer.timeout.connect(self._on_ui_timer_tick)
 
-        # Cache the last stats so we can re-emit on flush
-        self._last_stats: tuple | None = None
+        # Batch caching structures
+        self.log_accumulator = []
 
-    # ── public ────────────────────────────────────────────────────────────────
+    # ── PROPERTY BRIDGE HOOKS (Enables QML read/write access) ────────────────
+    @pyqtProperty(str, notify=srcPathChanged)
+    def src_path(self): return self._src_path
 
-    def start_copy(self, src: str, dst: str, workers: int) -> None:
-        if not src or not dst:
-            self.log_updated.emit("Error: Source and Destination must be set.")
+    @src_path.setter
+    def src_path(self, value):
+        if self._src_path != value:
+            self._src_path = value
+            self.srcPathChanged.emit(value)
+
+    @pyqtProperty(str, notify=dstPathChanged)
+    def dst_path(self): return self._dst_path
+
+    @dst_path.setter
+    def dst_path(self, value):
+        if self._dst_path != value:
+            self._dst_path = value
+            self.dstPathChanged.emit(value)
+
+    @pyqtProperty(bool, notify=isBusyChanged)
+    def is_busy(self): return self._is_busy
+
+    @pyqtProperty(str, notify=speedTextChanged)
+    def speed_text(self): return self._speed_text
+
+    @pyqtProperty(str, notify=etaTextChanged)
+    def eta_text(self): return self._eta_text
+
+    @pyqtProperty(int, notify=progressPctChanged)
+    def progress_pct(self): return self._progress_pct
+
+    @pyqtProperty(str, notify=filesLogChanged)
+    def files_html_log(self): return self._files_html_log
+
+    # ── EXPOSED QML SLOTS (Action Controllers) ────────────────────────────────
+
+    @pyqtSlot(str, str, int)
+    def start_copy(self, src: str, dst: str, threads: int):
+        """Triggered directly by QML 'Start Transfer' button onClicked channel."""
+        if self._is_busy:
             return
 
-        self.copier.workers = workers
-        self._pending_files.clear()
-        self._last_stats = None
-        self.ui_busy.emit(True)
+        # Synchronize back input parameters in case textfields mutated
+        self._src_path = src
+        self._dst_path = dst
 
-        self._worker = CopyWorker(self.copier, src, dst)
-        self._worker.log_message.connect(self.log_updated)
-        self._worker.file_done.connect(self._on_file_done)
-        self._worker.stats_tick.connect(self._on_stats_tick)
-        # bytes_tick is emitted at chunk granularity; we intentionally do NOT
-        # connect it to anything heavy — _on_stats_tick already batches updates.
-        self._worker.finished_sig.connect(self._on_finished)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.start()
+        # Clear out historical logs from previous executions
+        self._files_html_log = ""
+        self.filesLogChanged.emit(self._files_html_log)
+        self.log_accumulator.clear()
 
-        self._flush_timer.start()
+        # Update engine states
+        self._is_busy = True
+        self.isBusyChanged.emit(True)
 
-    def cancel_copy(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self.log_updated.emit("Cancellation requested…")
-            self.copier.cancel()
+        # ── INITIALIZE BACKEND THREAD WORKER ──────────────────────────────────
+        # Build your original CopyWorker using your existing core business parameters
+        copier = RoboCopier(workers=threads)
+        self.worker = CopyWorker(copier, src, dst)
 
-    # ── worker signal receivers (can be called from any thread via Qt queued) ─
+        # Wire up safety signal channels from background worker to ViewModel slots
+        self.worker.stats_tick.connect(self._on_worker_stats_tick)
+        self.worker.file_done.connect(self._on_worker_file_done)
+        self.worker.finished_sig.connect(self._on_worker_finished)
 
-    def _on_file_done(self, name: str, size_bytes: int, success: bool) -> None:
-        status = "done" if success else "failed"
-        self._pending_files.append((name, fmt_size(size_bytes), status))
+        # Launch background worker execution & fire the batch timer loop
+        self.ui_timer.start()
+        self.worker.start()
 
-    def _on_stats_tick(self, cf, tf, cb, tb, speed, eta) -> None:
-        # Just cache; _flush will emit to the View
-        self._last_stats = (cf, tf, cb, tb, speed, eta)
+    @pyqtSlot()
+    def cancel_copy(self):
+        """Triggered directly by QML 'Cancel' button onClicked channel."""
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel() # Trigger original abort flag inside copier engine
 
-    def _on_finished(self, results: list) -> None:
-        self._flush_timer.stop()
-        self._flush()          # drain anything still pending
-        self.ui_busy.emit(False)
-        self.copy_finished.emit()
+    # ── WORKER SIGNAL SLOTS (Thread-safe communications) ─────────────────────
 
-    # ── flush (main thread, called by timer) ──────────────────────────────────
+    def _on_worker_stats(self, speed_str: str, eta_str: str, pct: int):
+        """Update reactive components targeting the top statistics bar panel."""
+        self._speed_text = speed_str
+        self._eta_text = eta_str
+        self._progress_pct = pct
+        
+        # Fire events to notify QML layouts to realign visuals
+        self.speedTextChanged.emit(speed_str)
+        self.etaTextChanged.emit(eta_str)
+        self.progressPctChanged.emit(pct)
 
-    def _flush(self) -> None:
-        if self._pending_files:
-            self.file_batch.emit(list(self._pending_files))
-            self._pending_files.clear()
+    def _on_worker_file_completed(self, name: str, size: str, status: str):
+        """Queue raw string logs into an isolated cache instead of instantly printing."""
+        # Convert completion states into colored HTML objects matching old look
+        color_map = {"OK": "#34a853", "FAIL": "#ea4335", "SKIP": "#fbbc05"}
+        color = color_map.get(status, "#888888")
+        icon = "✔" if status == "OK" else "✖" if status == "FAIL" else "ℹ"
+        
+        html_segment = (
+            f'<span style="color:{color}">{icon}</span>'
+            f'&nbsp;{name}'
+            f'<span style="color:#555555\"> &nbsp;{size}</span>'
+        )
+        self.log_accumulator.append(html_segment)
 
-        if self._last_stats:
-            self.stats_update.emit(*self._last_stats)
-            self._last_stats = None
+    def _on_ui_timer_tick(self):
+        """Flushes the queued cached HTML lines straight up into QML memory space."""
+        if not self.log_accumulator:
+            return
+
+        # Merge new tokens into main log string using QML compatible line break tags
+        new_entries_block = "<br>".join(self.log_accumulator)
+        if self._files_html_log:
+            self._files_html_log += "<br>" + new_entries_block
+        else:
+            self._files_html_log = new_entries_block
+
+        self.log_accumulator.clear()
+        
+        # CRITICAL EMIT: Tells QML ScrollView to grab the updated rich text log layout
+        self.filesLogChanged.emit(self._files_html_log)
+
+    def _on_worker_finished(self):
+        """Teardown loops and close timers when background processes complete."""
+        self.ui_timer.stop()
+        
+        # Flush any residual trailing logs remaining inside accumulator storage
+        self._on_ui_timer_tick()
+
+        self._is_busy = False
+        self.isBusyChanged.emit(False)
+        
+        self._speed_text = "— B/s"
+        self._eta_text = "Finished"
+        self.speedTextChanged.emit(self._speed_text)
+        self.etaTextChanged.emit(self._eta_text)
+
+    def _on_worker_stats_tick(self, copied_files, total_files, copied_bytes, total_bytes, speed_bps, eta_sec):
+        """Processes periodic statistics ticks generated by the worker thread."""
+        # Calculate dynamic percentage safely
+        pct = int((copied_bytes / total_bytes * 100)) if total_bytes > 0 else 0
+        self._progress_pct = pct
+        self.progressPctChanged.emit(pct)
+
+        # Format speed into human readable string (using your fmt_size helper if available)
+        # Hoặc dùng định dạng tạm thời:
+        if speed_bps > 1024 * 1024:
+            speed_str = f"{speed_bps / (1024*1024):.1f} MB/s"
+        elif speed_bps > 1024:
+            speed_str = f"{speed_bps / 1024:.1f} KB/s"
+        else:
+            speed_str = f"{speed_bps:.0f} B/s"
+            
+        self._speed_text = speed_str
+        self.speedTextChanged.emit(speed_str)
+
+        # Format ETA text safely
+        if eta_sec < 0:
+            eta_str = "—"
+        elif eta_sec == 0:
+            eta_str = "Done"
+        else:
+            m, s = divmod(int(eta_sec), 60)
+            h, m = divmod(m, 60)
+            eta_str = f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+            
+        self._eta_text = eta_str
+        self.etaTextChanged.emit(eta_str)
+
+
+    def _on_worker_file_done(self, name: str, size_bytes: int, success: bool):
+        """Queue raw completed file definitions into the batch layout accumulator."""
+        status = "OK" if success else "FAIL"
+        color = "#34a853" if success else "#ea4335"
+        icon = "✔" if success else "✖"
+        
+        # Format human size
+        if size_bytes > 1024 * 1024 * 1024:
+            size_str = f"{size_bytes / (1024*1024*1024):.1f} GB"
+        elif size_bytes > 1024 * 1024:
+            size_str = f"{size_bytes / (1024*1024):.1f} MB"
+        else:
+            size_str = f"{size_bytes / 1024:.1f} KB"
+
+        # Escape HTML entities inside path definitions to avoid layout breaks
+        safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        html_segment = (
+            f'<span style="color:{color}">{icon}</span>'
+            f'&nbsp;{safe_name}'
+            f'<span style="color:#555555\"> &nbsp;({size_str})</span>'
+        )
+        self.log_accumulator.append(html_segment)
+
+
+    def _on_worker_finished(self, results_list=None):
+        """Teardown loops and close timers when background processes complete."""
+        self.ui_timer.stop()
+        self._on_ui_timer_tick() # Flush any remaining lines to QML
+
+        self._is_busy = False
+        self.isBusyChanged.emit(False)
+        
+        # self._speed_text = "— B/s"
+        # self._eta_text = "Finished"
+        # self.speedTextChanged.emit(self._speed_text)
+        # self.etaTextChanged.emit(self._eta_text)

@@ -1,5 +1,5 @@
 """
-main_window.py  –  Two-tab RoboCopy UI: Local and Network (SMB).
+main_window.py  –  Two-tab pyRoboCopy UI: Local and Network (SMB).
 
 Local tab  : identical to the original copy-folder workflow.
 Network tab: SMB credential entry → connect → tree with checkboxes
@@ -1198,9 +1198,8 @@ class MainWindow(QMainWindow):
         self.vm      = vm
         self.net_vm  = NetworkViewModel()
 
-        self.setWindowTitle("RoboCopy")
-        self.setMinimumSize(480, 400)   # smallest usable size on any screen
-        self.resize(780, 720)           # default size — user can resize freely
+        self.setWindowTitle("pyRoboCopy")
+        self.resize(780, 720)
         self.setStyleSheet(DARK)
 
         root = QWidget()

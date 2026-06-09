@@ -43,7 +43,7 @@ def _launch_main(splash: SplashScreen):
         err = QMessageBox()
         err.setWindowTitle("Startup Error")
         err.setIcon(QMessageBox.Icon.Critical)
-        err.setText("RoboCopy failed to start.")
+        err.setText("pyRoboCopy failed to start.")
         err.setDetailedText(msg)
         err.exec()
         sys.exit(1)
@@ -51,7 +51,7 @@ def _launch_main(splash: SplashScreen):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("RoboCopy")
+    app.setApplicationName("pyRoboCopy")
     app.setWindowIcon(QIcon(_asset("icon.ico")))
 
     splash = SplashScreen()
